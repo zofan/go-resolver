@@ -13,10 +13,12 @@ import (
 )
 
 const (
-	ModeRandom       = 1
-	ModeRoundRobin   = 2
-	NameServersURL   = `https://public-dns.info/nameservers.txt`
-	nameServerSuffix = `:53`
+	ModeRandom SelectMode = 1
+	ModeRotate SelectMode = 2
+	ModeTime   SelectMode = 3
+
+	ServerListURL = `https://public-dns.info/nameservers.txt`
+	addressSuffix = `:53`
 )
 
 var (
@@ -26,13 +28,15 @@ var (
 	ErrNoSuchHost      = errors.New(`host not found`)
 )
 
+type SelectMode int
+
 type Resolver struct {
 	servers []*Server
 	lastNS  uint32
 
 	DialTimeout uint32
 	MaxFails    uint32
-	Mode        int
+	Mode        SelectMode
 	RetryLimit  int
 	CacheLimit  int
 	CacheLife   int
@@ -52,7 +56,7 @@ type Server struct {
 
 func New() *Resolver {
 	return &Resolver{
-		Mode:        ModeRoundRobin,
+		Mode:        ModeRotate,
 		DialTimeout: 1, // don't work, look at problem (net.dnsConfig.timeout - net/dnsconfig_unix.go:43)
 		RetryLimit:  5,
 		MaxFails:    10,
@@ -105,9 +109,11 @@ func (r *Resolver) GetServer() (*Server, error) {
 	}
 
 	switch r.Mode {
+	case ModeTime:
+		return r.servers[time.Now().Unix()%int64(len(r.servers))], nil
 	case ModeRandom:
 		return r.servers[rand.Intn(len(r.servers))], nil
-	case ModeRoundRobin:
+	case ModeRotate:
 		addr := r.servers[r.lastNS]
 
 		r.lastNS++
@@ -131,6 +137,7 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 			return err
 		}
 
+		// todo: replace that to the custom dns client
 		stdR := &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -138,7 +145,7 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 					//Timeout: time.Millisecond * time.Duration(r.DialTimeout),
 					//Deadline: time.Now().Add(time.Millisecond * time.Duration(r.DialTimeout)),
 				}
-				return d.DialContext(ctx, `udp`, server.Addr+nameServerSuffix)
+				return d.DialContext(ctx, `udp`, server.Addr+addressSuffix)
 			},
 		}
 

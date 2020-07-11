@@ -37,7 +37,7 @@ func TestGetServerRoundRobin(t *testing.T) {
 		t.Error(err)
 	}
 
-	r.Mode = ModeRoundRobin
+	r.Mode = ModeRotate
 
 	servers := r.GetServers()
 
@@ -218,7 +218,7 @@ func TestConcurrency(t *testing.T) {
 	r.MaxFails = 1
 	r.RetryLimit = 2
 
-	err := r.LoadFromURL(NameServersURL)
+	err := r.LoadFromURL(ServerListURL)
 	if err != nil {
 		t.Error(err)
 	}
@@ -240,10 +240,9 @@ func TestConcurrency(t *testing.T) {
 	go func() {
 		for i := 0; i < 10; i++ {
 			println(i)
-			_, err := r.ResolveHost(fmt.Sprintf(`abc-%d`, i) + `.yandex.com`)
+			_, err := r.ResolveHost(fmt.Sprintf(`abc-%d`, i) + `-yandex.com`)
 			if err != nil {
 				t.Error(err)
-				return
 			}
 		}
 		wg.Done()
