@@ -38,6 +38,7 @@ type Resolver struct {
 	MaxFails    uint32
 	Mode        SelectMode
 	RetryLimit  int
+	RetrySleep  time.Duration
 	CacheLimit  int
 	CacheLife   int
 
@@ -59,6 +60,7 @@ func New() *Resolver {
 		Mode:        ModeRotate,
 		DialTimeout: 1, // don't work, look at problem (net.dnsConfig.timeout - net/dnsconfig_unix.go:43)
 		RetryLimit:  5,
+		RetrySleep:  time.Second * 1,
 		MaxFails:    10,
 		CacheLimit:  10000,
 		CacheLife:   600,
@@ -168,6 +170,8 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 			return ErrRetryLimit
 		}
 		attempts++
+
+		time.Sleep(r.RetrySleep)
 	}
 
 	return err
