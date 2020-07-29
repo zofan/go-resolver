@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -43,6 +44,8 @@ type Resolver struct {
 	CacheLife   int
 
 	cache map[string]cacheHost
+
+	mu sync.Mutex
 }
 
 type cacheHost struct {
@@ -60,8 +63,8 @@ func New() *Resolver {
 		Mode:        ModeRotate,
 		DialTimeout: 1, // don't work, look at problem (net.dnsConfig.timeout - net/dnsconfig_unix.go:43)
 		RetryLimit:  5,
-		RetrySleep:  time.Second * 1,
-		MaxFails:    10,
+		RetrySleep:  time.Second * 5,
+		MaxFails:    30,
 		CacheLimit:  10000,
 		CacheLife:   600,
 
@@ -110,6 +113,9 @@ func (r *Resolver) GetServer() (*Server, error) {
 		return nil, ErrServerListEmpty
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	switch r.Mode {
 	case ModeTime:
 		return r.servers[time.Now().Unix()%int64(len(r.servers))], nil
@@ -146,6 +152,7 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 				d := net.Dialer{
 					//Timeout: time.Millisecond * time.Duration(r.DialTimeout),
 					//Deadline: time.Now().Add(time.Millisecond * time.Duration(r.DialTimeout)),
+					Resolver: nil,
 				}
 				return d.DialContext(ctx, `udp`, server.Addr+addressSuffix)
 			},
@@ -171,7 +178,9 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 		}
 		attempts++
 
-		time.Sleep(r.RetrySleep)
+		if len(r.servers) == 1 {
+			time.Sleep(r.RetrySleep)
+		}
 	}
 
 	return err
@@ -220,6 +229,9 @@ func (r *Resolver) LookupNS(host string) ([]*net.NS, error) {
 }
 
 func (r *Resolver) removeServer(server *Server) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	for i, v := range r.servers {
 		if v == server {
 			r.servers[i] = r.servers[len(r.servers)-1]
@@ -232,6 +244,9 @@ func (r *Resolver) removeServer(server *Server) {
 }
 
 func (r *Resolver) clearCache() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	now := time.Now()
 
 	// remove all long time used hosts
