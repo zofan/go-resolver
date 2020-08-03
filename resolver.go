@@ -32,8 +32,10 @@ var (
 type SelectMode int
 
 type Resolver struct {
-	servers []*Server
-	lastNS  uint32
+	servers    []*Server
+	badServers []*Server
+	srvTicker  *time.Ticker
+	lastNS     uint32
 
 	DialTimeout uint32
 	MaxFails    uint32
@@ -54,22 +56,32 @@ type cacheHost struct {
 }
 
 type Server struct {
-	Addr  string
-	Fails uint32
+	Addr      string
+	Fails     uint32
+	LastUsage time.Time
 }
 
 func New() *Resolver {
-	return &Resolver{
+	r := &Resolver{
 		Mode:        ModeRotate,
 		DialTimeout: 1, // don't work, look at problem (net.dnsConfig.timeout - net/dnsconfig_unix.go:43)
 		RetryLimit:  5,
-		RetrySleep:  time.Second * 5,
+		RetrySleep:  time.Millisecond * 500,
 		MaxFails:    30,
 		CacheLimit:  10000,
 		CacheLife:   600,
 
 		cache: make(map[string]cacheHost),
 	}
+
+	go func(r *Resolver) {
+		t := time.NewTicker(time.Minute * 5)
+		for range t.C {
+			r.restoreBadServers()
+		}
+	}(r)
+
+	return r
 }
 
 func (r *Resolver) LoadFromString(servers string) error {
@@ -88,6 +100,10 @@ func (r *Resolver) LoadFromURL(url string) error {
 }
 
 func (r *Resolver) LoadFromReader(reader io.Reader) error {
+	r.servers = []*Server{}
+	r.badServers = []*Server{}
+	r.lastNS = 0
+
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		addr := strings.TrimSpace(scanner.Text())
@@ -98,8 +114,6 @@ func (r *Resolver) LoadFromReader(reader io.Reader) error {
 
 		r.servers = append(r.servers, &Server{Addr: ip.String()})
 	}
-
-	r.lastNS = 0
 
 	return scanner.Err()
 }
@@ -133,57 +147,6 @@ func (r *Resolver) GetServer() (*Server, error) {
 	default:
 		return nil, ErrBadMode
 	}
-}
-
-func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
-	var err error
-	attempts := 1
-
-	for {
-		server, err := r.GetServer()
-		if err != nil {
-			return err
-		}
-
-		// todo: replace that to the custom dns client
-		stdR := &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				d := net.Dialer{
-					//Timeout: time.Millisecond * time.Duration(r.DialTimeout),
-					//Deadline: time.Now().Add(time.Millisecond * time.Duration(r.DialTimeout)),
-					Resolver: nil,
-				}
-				return d.DialContext(ctx, `udp`, server.Addr+addressSuffix)
-			},
-		}
-
-		err = fn(stdR)
-		{
-			if err, ok := err.(*net.DNSError); ok && err.IsNotFound {
-				server.Fails = 0
-				return ErrNoSuchHost
-			} else if err == nil {
-				server.Fails = 0
-				break
-			} else if server.Fails > r.MaxFails {
-				r.removeServer(server)
-			} else {
-				server.Fails++
-			}
-		}
-
-		if r.RetryLimit > 0 && attempts >= r.RetryLimit {
-			return ErrRetryLimit
-		}
-		attempts++
-
-		if len(r.servers) == 1 {
-			time.Sleep(r.RetrySleep)
-		}
-	}
-
-	return err
 }
 
 func (r *Resolver) ResolveHost(host string) ([]net.IPAddr, error) {
@@ -228,12 +191,83 @@ func (r *Resolver) LookupNS(host string) ([]*net.NS, error) {
 	return result, err
 }
 
+func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
+	var err error
+	attempts := 1
+
+	for {
+		server, err := r.GetServer()
+		if err != nil {
+			return err
+		}
+
+		server.LastUsage = time.Now()
+
+		// todo: replace that to the custom dns client
+		stdR := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{
+					//Timeout: time.Millisecond * time.Duration(r.DialTimeout),
+					//Deadline: time.Now().Add(time.Millisecond * time.Duration(r.DialTimeout)),
+					Resolver: nil,
+				}
+				return d.DialContext(ctx, `udp`, server.Addr+addressSuffix)
+			},
+		}
+
+		err = fn(stdR)
+		{
+			if err, ok := err.(*net.DNSError); ok && err.IsNotFound {
+				server.Fails = 0
+				return ErrNoSuchHost
+			} else if err == nil {
+				server.Fails = 0
+				break
+			} else if server.Fails > r.MaxFails {
+				r.removeServer(server)
+			} else {
+				server.Fails++
+			}
+		}
+
+		if r.RetryLimit > 0 && attempts >= r.RetryLimit {
+			return ErrRetryLimit
+		}
+		attempts++
+
+		if len(r.servers) < 10 {
+			time.Sleep(r.RetrySleep)
+		}
+	}
+
+	return err
+}
+
+func (r *Resolver) restoreBadServers() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for i, s := range r.badServers {
+		if time.Since(s.LastUsage) > time.Minute*10 {
+
+			r.badServers[i] = r.badServers[len(r.badServers)-1]
+			r.badServers = r.badServers[:len(r.badServers)-1]
+
+			r.servers = append(r.servers, s)
+			s.Fails = 0
+		}
+	}
+}
+
 func (r *Resolver) removeServer(server *Server) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	for i, v := range r.servers {
 		if v == server {
+			r.badServers = append(r.badServers, server)
+
 			r.servers[i] = r.servers[len(r.servers)-1]
 			r.servers = r.servers[:len(r.servers)-1]
 
