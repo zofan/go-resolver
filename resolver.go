@@ -250,9 +250,7 @@ func (r *Resolver) restoreBadServers() {
 
 	for i, s := range r.badServers {
 		if time.Since(s.LastUsage) > time.Minute*10 {
-
-			r.badServers[i] = r.badServers[len(r.badServers)-1]
-			r.badServers = r.badServers[:len(r.badServers)-1]
+			r.badServers = append(r.badServers[:i], r.badServers[i+1:]...)
 
 			r.servers = append(r.servers, s)
 			s.Fails = 0
