@@ -296,3 +296,13 @@ func (r *Resolver) clearCache() {
 		}
 	}
 }
+
+func (r *Resolver) Debug() map[string]interface{} {
+	d := make(map[string]interface{})
+
+	d[`servers`] = len(r.servers)
+	d[`badServers`] = len(r.badServers)
+	d[`cacheSize`] = len(r.cache)
+
+	return d
+}
