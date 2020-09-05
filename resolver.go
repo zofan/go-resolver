@@ -191,6 +191,17 @@ func (r *Resolver) LookupNS(host string) ([]*net.NS, error) {
 	return result, err
 }
 
+func (r *Resolver) LookupTXT(host string) ([]string, error) {
+	var result []string
+
+	err := r.lookup(host, func(resolver *net.Resolver) (err error) {
+		result, err = resolver.LookupTXT(context.Background(), host)
+		return
+	})
+
+	return result, err
+}
+
 func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 	var err error
 	attempts := 1
