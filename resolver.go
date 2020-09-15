@@ -23,10 +23,10 @@ const (
 )
 
 var (
-	ErrServerListEmpty = errors.New(`server list is empty`)
-	ErrBadMode         = errors.New(`bad mode`)
-	ErrRetryLimit      = errors.New(`retry limit`)
-	ErrNoSuchHost      = errors.New(`host not found`)
+	ErrServerListEmpty = errors.New(`resolver: server list is empty`)
+	ErrBadMode         = errors.New(`resolver: bad mode`)
+	ErrRetryLimit      = errors.New(`resolver: retry limit`)
+	ErrNoSuchHost      = errors.New(`resolver: host not found`)
 )
 
 type SelectMode int
