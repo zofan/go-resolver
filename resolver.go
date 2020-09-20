@@ -43,7 +43,8 @@ type Resolver struct {
 	RetryLimit  int
 	RetrySleep  time.Duration
 	CacheLimit  int
-	CacheLife   int
+	CacheLife   time.Duration
+	RestoreTime time.Duration
 
 	cache map[string]cacheHost
 
@@ -68,8 +69,9 @@ func New() *Resolver {
 		RetryLimit:  5,
 		RetrySleep:  time.Millisecond * 500,
 		MaxFails:    30,
-		CacheLimit:  10000,
-		CacheLife:   600,
+		CacheLimit:  65535,
+		CacheLife:   time.Second * 300,
+		RestoreTime: time.Minute * 15,
 
 		cache: make(map[string]cacheHost),
 	}
@@ -77,7 +79,7 @@ func New() *Resolver {
 	go func(r *Resolver) {
 		t := time.NewTicker(time.Minute * 5)
 		for range t.C {
-			r.restoreBadServers()
+			r.restoreServers()
 		}
 	}(r)
 
@@ -106,16 +108,19 @@ func (r *Resolver) LoadFromReader(reader io.Reader) error {
 
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
-		addr := strings.TrimSpace(scanner.Text())
-		ip := net.ParseIP(addr)
-		if ip == nil || !ip.IsGlobalUnicast() {
-			continue
-		}
-
-		r.servers = append(r.servers, &Server{Addr: ip.String()})
+		r.AddServer(strings.TrimSpace(scanner.Text()))
 	}
 
 	return scanner.Err()
+}
+
+func (r *Resolver) AddServer(addr string) {
+	ip := net.ParseIP(addr)
+	if ip == nil || !ip.IsGlobalUnicast() {
+		return
+	}
+
+	r.servers = append(r.servers, &Server{Addr: ip.String()})
 }
 
 func (r *Resolver) GetServers() []*Server {
@@ -150,7 +155,7 @@ func (r *Resolver) GetServer() (*Server, error) {
 }
 
 func (r *Resolver) ResolveHost(host string) ([]net.IPAddr, error) {
-	if v, ok := r.cache[host]; ok {
+	if v, ok := r.cache[host]; ok && r.CacheLimit > 0 {
 		v.lastHit = time.Now()
 		return v.resolve, nil
 	}
@@ -161,10 +166,12 @@ func (r *Resolver) ResolveHost(host string) ([]net.IPAddr, error) {
 		return
 	})
 
-	if len(r.cache) > r.CacheLimit-1 {
-		r.clearCache()
+	if r.CacheLimit > 0 {
+		if len(r.cache) > r.CacheLimit-1 {
+			r.clearCache()
+		}
+		r.cache[host] = cacheHost{resolve: result, lastHit: time.Now()}
 	}
-	r.cache[host] = cacheHost{resolve: result, lastHit: time.Now()}
 
 	return result, err
 }
@@ -214,12 +221,12 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 
 		server.LastUsage = time.Now()
 
-		// todo: replace that to the custom dns client
+		// todo: replace that to the custom dns client with proxy
 		stdR := &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				d := net.Dialer{
-					//Timeout: time.Millisecond * time.Duration(r.DialTimeout),
+					Timeout: time.Millisecond * time.Duration(r.DialTimeout),
 					//Deadline: time.Now().Add(time.Millisecond * time.Duration(r.DialTimeout)),
 					Resolver: nil,
 				}
@@ -236,7 +243,7 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 				server.Fails = 0
 				break
 			} else if server.Fails > r.MaxFails {
-				r.removeServer(server)
+				r.disableServer(server)
 			} else {
 				server.Fails++
 			}
@@ -255,12 +262,12 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 	return err
 }
 
-func (r *Resolver) restoreBadServers() {
+func (r *Resolver) restoreServers() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	for i, s := range r.badServers {
-		if time.Since(s.LastUsage) > time.Minute*10 {
+		if time.Since(s.LastUsage) > r.RestoreTime {
 			r.badServers = append(r.badServers[:i], r.badServers[i+1:]...)
 
 			r.servers = append(r.servers, s)
@@ -269,7 +276,7 @@ func (r *Resolver) restoreBadServers() {
 	}
 }
 
-func (r *Resolver) removeServer(server *Server) {
+func (r *Resolver) disableServer(server *Server) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -294,13 +301,13 @@ func (r *Resolver) clearCache() {
 
 	// remove all long time used hosts
 	for h, c := range r.cache {
-		if now.Sub(c.lastHit) > time.Second*time.Duration(r.CacheLife) {
+		if now.Sub(c.lastHit) >= r.CacheLife {
 			delete(r.cache, h)
 		}
 	}
 
 	// remove the random key if the previous step didn't give result
-	if len(r.cache) > r.CacheLimit-1 {
+	if len(r.cache) >= r.CacheLimit {
 		for h := range r.cache {
 			delete(r.cache, h)
 			break
