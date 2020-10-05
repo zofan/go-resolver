@@ -37,7 +37,7 @@ type Resolver struct {
 	srvTicker  *time.Ticker
 	lastNS     uint32
 
-	DialTimeout uint32
+	DialTimeout time.Duration
 	MaxFails    uint32
 	Mode        SelectMode
 	RetryLimit  int
@@ -52,7 +52,7 @@ type Resolver struct {
 }
 
 type cacheHost struct {
-	resolve []net.IPAddr
+	addr    []net.IPAddr
 	lastHit time.Time
 }
 
@@ -65,7 +65,7 @@ type Server struct {
 func New() *Resolver {
 	r := &Resolver{
 		Mode:        ModeRotate,
-		DialTimeout: 1, // don't work, look at problem (net.dnsConfig.timeout - net/dnsconfig_unix.go:43)
+		DialTimeout: time.Second, // don't work, look at problem (net.dnsConfig.timeout - net/dnsconfig_unix.go:43)
 		RetryLimit:  5,
 		RetrySleep:  time.Millisecond * 500,
 		MaxFails:    30,
@@ -76,12 +76,11 @@ func New() *Resolver {
 		cache: make(map[string]cacheHost),
 	}
 
-	go func(r *Resolver) {
-		t := time.NewTicker(time.Minute * 5)
-		for range t.C {
+	go func() {
+		for range time.Tick(time.Minute) {
 			r.restoreServers()
 		}
-	}(r)
+	}()
 
 	return r
 }
@@ -102,6 +101,9 @@ func (r *Resolver) LoadFromURL(url string) error {
 }
 
 func (r *Resolver) LoadFromReader(reader io.Reader) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.servers = []*Server{}
 	r.badServers = []*Server{}
 	r.lastNS = 0
@@ -155,10 +157,13 @@ func (r *Resolver) GetServer() (*Server, error) {
 }
 
 func (r *Resolver) ResolveHost(host string) ([]net.IPAddr, error) {
+	r.mu.Lock()
 	if v, ok := r.cache[host]; ok && r.CacheLimit > 0 {
 		v.lastHit = time.Now()
-		return v.resolve, nil
+		r.mu.Unlock()
+		return v.addr, nil
 	}
+	r.mu.Unlock()
 
 	var result []net.IPAddr
 	err := r.lookup(host, func(resolver *net.Resolver) (err error) {
@@ -167,10 +172,12 @@ func (r *Resolver) ResolveHost(host string) ([]net.IPAddr, error) {
 	})
 
 	if r.CacheLimit > 0 {
+		r.mu.Lock()
 		if len(r.cache) > r.CacheLimit-1 {
 			r.clearCache()
 		}
-		r.cache[host] = cacheHost{resolve: result, lastHit: time.Now()}
+		r.cache[host] = cacheHost{addr: result, lastHit: time.Now()}
+		r.mu.Unlock()
 	}
 
 	return result, err
@@ -226,7 +233,7 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				d := net.Dialer{
-					Timeout: time.Millisecond * time.Duration(r.DialTimeout),
+					Timeout: r.DialTimeout,
 					//Deadline: time.Now().Add(time.Millisecond * time.Duration(r.DialTimeout)),
 					Resolver: nil,
 				}
@@ -268,9 +275,11 @@ func (r *Resolver) restoreServers() {
 
 	for i, s := range r.badServers {
 		if time.Since(s.LastUsage) > r.RestoreTime {
-			r.badServers = append(r.badServers[:i], r.badServers[i+1:]...)
+			r.badServers[i] = r.badServers[len(r.badServers)-1]
+			r.badServers = r.badServers[:len(r.badServers)-1]
 
 			r.servers = append(r.servers, s)
+
 			s.Fails = 0
 		}
 	}
@@ -280,12 +289,12 @@ func (r *Resolver) disableServer(server *Server) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for i, v := range r.servers {
-		if v == server {
-			r.badServers = append(r.badServers, server)
-
+	for i, s := range r.servers {
+		if s == server {
 			r.servers[i] = r.servers[len(r.servers)-1]
 			r.servers = r.servers[:len(r.servers)-1]
+
+			r.badServers = append(r.badServers, s)
 
 			r.lastNS = 0
 			break
@@ -294,9 +303,6 @@ func (r *Resolver) disableServer(server *Server) {
 }
 
 func (r *Resolver) clearCache() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	now := time.Now()
 
 	// remove all long time used hosts
