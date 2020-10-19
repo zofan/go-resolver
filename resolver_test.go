@@ -15,7 +15,7 @@ func TestResolveHost(t *testing.T) {
 		t.Error(err)
 	}
 
-	ips, err := r.ResolveHost(`yandex.ru`)
+	ips, err := r.LookupIPAddr(`yandex.ru`)
 	if err != nil {
 		t.Error(err)
 	}
@@ -32,7 +32,7 @@ func TestResolveNotExistsHost(t *testing.T) {
 		t.Error(err)
 	}
 
-	_, err = r.ResolveHost(`abc-123-def-456-zzzzzzz.com`)
+	_, err = r.LookupIPAddr(`abc-123-def-456-zzzzzzz.com`)
 	if err != ErrNoSuchHost {
 		t.Error(err)
 	}
@@ -46,7 +46,7 @@ func TestReverseIP(t *testing.T) {
 		t.Error(err)
 	}
 
-	hosts, err := r.ReverseIP(`5.255.255.70`)
+	hosts, err := r.LookupAddr(`5.255.255.70`)
 	if err != nil {
 		t.Error(err)
 	}
@@ -63,7 +63,7 @@ func TestRetry(t *testing.T) {
 		t.Error(err)
 	}
 
-	ips, err := r.ResolveHost(`google.com`)
+	ips, err := r.LookupIPAddr(`google.com`)
 	if err != nil {
 		t.Error(err)
 	}
@@ -81,7 +81,7 @@ func TestRetryLimit(t *testing.T) {
 		t.Error(err)
 	}
 
-	_, err = r.ResolveHost(`google.com`)
+	_, err = r.LookupIPAddr(`google.com`)
 	if err != ErrRetryLimit {
 		t.Error(err)
 	}
@@ -97,7 +97,7 @@ func TestRemoveBadServer(t *testing.T) {
 		t.Error(err)
 	}
 
-	_, err = r.ResolveHost(`google.com`)
+	_, err = r.LookupIPAddr(`google.com`)
 	if err != slist.ErrServerListEmpty {
 		t.Error(err)
 	}
@@ -120,7 +120,7 @@ func TestConcurrency(t *testing.T) {
 
 	go func() {
 		for i := 0; i < 1000; i++ {
-			_, err := r.ResolveHost(`google.com`)
+			_, err := r.LookupIPAddr(`google.com`)
 			if err != nil {
 				t.Error(err)
 				return
@@ -131,7 +131,7 @@ func TestConcurrency(t *testing.T) {
 
 	go func() {
 		for i := 0; i < 10; i++ {
-			_, err := r.ResolveHost(fmt.Sprintf(`abc-%d`, i) + `-yandex.com`)
+			_, err := r.LookupIPAddr(fmt.Sprintf(`abc-%d`, i) + `-yandex.com`)
 			if err == nil {
 				t.Error(err)
 			}

@@ -22,12 +22,13 @@ var (
 type Resolver struct {
 	Servers *slist.List
 
-	DialTimeout time.Duration
-	MaxFails    uint32
-	RetryLimit  int
-	RetrySleep  time.Duration
-	CacheLimit  int
-	CacheLife   time.Duration
+	DialTimeout  time.Duration
+	MaxFails     uint32
+	RetryLimit   int
+	RetrySleep   time.Duration
+	CacheLimit   int
+	CacheLife    time.Duration
+	BypassNative bool
 
 	cache map[string]cacheHost
 
@@ -56,7 +57,7 @@ func New() *Resolver {
 	return r
 }
 
-func (r *Resolver) ResolveHost(host string) ([]net.IPAddr, error) {
+func (r *Resolver) LookupIPAddr(host string) (ipList []net.IPAddr, err error) {
 	r.mu.Lock()
 	if v, ok := r.cache[host]; ok && r.CacheLimit > 0 {
 		v.lastHit = time.Now()
@@ -65,55 +66,90 @@ func (r *Resolver) ResolveHost(host string) ([]net.IPAddr, error) {
 	}
 	r.mu.Unlock()
 
-	var result []net.IPAddr
-	err := r.lookup(host, func(resolver *net.Resolver) (err error) {
-		result, err = resolver.LookupIPAddr(context.Background(), host)
+	err = r.lookup(host, func(resolver *net.Resolver) (err error) {
+		ipList, err = resolver.LookupIPAddr(context.Background(), host)
 		return
 	})
+
+	if r.BypassNative && err == slist.ErrServerListEmpty {
+		ipList, err = net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	}
 
 	if r.CacheLimit > 0 {
 		r.mu.Lock()
 		if len(r.cache) > r.CacheLimit-1 {
 			r.clearCache()
 		}
-		r.cache[host] = cacheHost{addr: result, lastHit: time.Now()}
+		r.cache[host] = cacheHost{addr: ipList, lastHit: time.Now()}
 		r.mu.Unlock()
+	}
+
+	return ipList, err
+}
+
+func (r *Resolver) LookupAddr(ip string) (names []string, err error) {
+	err = r.lookup(ip, func(resolver *net.Resolver) (err error) {
+		names, err = resolver.LookupAddr(context.Background(), ip)
+		return
+	})
+
+	if r.BypassNative && err == slist.ErrServerListEmpty {
+		names, err = net.DefaultResolver.LookupAddr(context.Background(), ip)
+	}
+
+	return names, err
+}
+
+func (r *Resolver) LookupNS(host string) (nsList []*net.NS, err error) {
+	err = r.lookup(host, func(resolver *net.Resolver) (err error) {
+		nsList, err = resolver.LookupNS(context.Background(), host)
+		return
+	})
+
+	if r.BypassNative && err == slist.ErrServerListEmpty {
+		nsList, err = net.DefaultResolver.LookupNS(context.Background(), host)
+	}
+
+	return nsList, err
+}
+
+func (r *Resolver) LookupTXT(host string) (result []string, err error) {
+	err = r.lookup(host, func(resolver *net.Resolver) (err error) {
+		result, err = resolver.LookupTXT(context.Background(), host)
+		return
+	})
+
+	if r.BypassNative && err == slist.ErrServerListEmpty {
+		result, err = net.DefaultResolver.LookupTXT(context.Background(), host)
 	}
 
 	return result, err
 }
 
-func (r *Resolver) ReverseIP(ip string) ([]string, error) {
-	var result []string
-
-	err := r.lookup(ip, func(resolver *net.Resolver) (err error) {
-		result, err = resolver.LookupAddr(context.Background(), ip)
+func (r *Resolver) LookupCNAME(host string) (cname string, err error) {
+	err = r.lookup(host, func(resolver *net.Resolver) (err error) {
+		cname, err = resolver.LookupCNAME(context.Background(), host)
 		return
 	})
 
-	return result, err
+	if r.BypassNative && err == slist.ErrServerListEmpty {
+		cname, err = net.DefaultResolver.LookupCNAME(context.Background(), host)
+	}
+
+	return cname, err
 }
 
-func (r *Resolver) LookupNS(host string) ([]*net.NS, error) {
-	var result []*net.NS
-
-	err := r.lookup(host, func(resolver *net.Resolver) (err error) {
-		result, err = resolver.LookupNS(context.Background(), host)
+func (r *Resolver) LookupMX(host string) (mxList []*net.MX, err error) {
+	err = r.lookup(host, func(resolver *net.Resolver) (err error) {
+		mxList, err = resolver.LookupMX(context.Background(), host)
 		return
 	})
 
-	return result, err
-}
+	if r.BypassNative && err == slist.ErrServerListEmpty {
+		mxList, err = net.DefaultResolver.LookupMX(context.Background(), host)
+	}
 
-func (r *Resolver) LookupTXT(host string) ([]string, error) {
-	var result []string
-
-	err := r.lookup(host, func(resolver *net.Resolver) (err error) {
-		result, err = resolver.LookupTXT(context.Background(), host)
-		return
-	})
-
-	return result, err
+	return mxList, err
 }
 
 func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
@@ -126,15 +162,14 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 			return err
 		}
 
-		// todo: replace that to the custom dns client with proxy
 		stdR := &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				d := net.Dialer{
-					Timeout: r.DialTimeout,
-					//Deadline: time.Now().Add(time.Millisecond * time.Duration(r.DialTimeout)),
+					Timeout:  r.DialTimeout,
 					Resolver: nil,
 				}
+
 				return d.DialContext(ctx, `udp`, server.Addr+addressSuffix)
 			},
 		}
@@ -157,7 +192,7 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 		}
 		attempts++
 
-		if r.Servers.Count() < 10 {
+		if r.Servers.Count() < 20 {
 			time.Sleep(r.RetrySleep)
 		}
 	}
