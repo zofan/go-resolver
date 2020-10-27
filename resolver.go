@@ -42,7 +42,7 @@ type cacheHost struct {
 
 func New() *Resolver {
 	r := &Resolver{
-		DialTimeout: time.Second, // don't work, look at problem (net.dnsConfig.timeout - net/dnsconfig_unix.go:43)
+		DialTimeout: time.Second * 2, // don't work, look at problem (net.dnsConfig.timeout - net/dnsconfig_unix.go:43)
 		RetryLimit:  5,
 		RetrySleep:  time.Millisecond * 500,
 		MaxFails:    30,
@@ -166,8 +166,9 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				d := net.Dialer{
-					Timeout:  r.DialTimeout,
-					Resolver: nil,
+					Timeout:   r.DialTimeout,
+					KeepAlive: r.DialTimeout,
+					Resolver:  nil,
 				}
 
 				return d.DialContext(ctx, `udp`, server.Addr+addressSuffix)
@@ -183,7 +184,7 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 				server.Good()
 				break
 			} else {
-				r.Servers.MarkBad(server)
+				r.Servers.Bad(server)
 			}
 		}
 
