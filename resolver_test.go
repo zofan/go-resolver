@@ -105,8 +105,6 @@ func TestRemoveBadServer(t *testing.T) {
 
 func TestConcurrency(t *testing.T) {
 	r := New()
-	r.CacheLimit = 50
-	r.CacheLife = 10
 	r.MaxFails = 1
 	r.RetryLimit = 2
 
@@ -119,7 +117,7 @@ func TestConcurrency(t *testing.T) {
 	wg.Add(2)
 
 	go func() {
-		for i := 0; i < 1000; i++ {
+		for i := 0; i < 3; i++ {
 			_, err := r.LookupIPAddr(`google.com`)
 			if err != nil {
 				t.Error(err)
@@ -130,7 +128,7 @@ func TestConcurrency(t *testing.T) {
 	}()
 
 	go func() {
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 3; i++ {
 			_, err := r.LookupIPAddr(fmt.Sprintf(`abc-%d`, i) + `-yandex.com`)
 			if err == nil {
 				t.Error(err)

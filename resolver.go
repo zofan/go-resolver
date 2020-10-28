@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	ServerListURL = `https://public-dns.info/nameservers.txt`
-	addressSuffix = `:53`
+	ServerListURL      = `https://public-dns.info/nameservers.txt`
+	addressSuffix      = `:53`
+	maxServersForSleep = 20
 )
 
 var (
@@ -26,18 +27,9 @@ type Resolver struct {
 	MaxFails     uint32
 	RetryLimit   int
 	RetrySleep   time.Duration
-	CacheLimit   int
-	CacheLife    time.Duration
 	BypassNative bool
 
-	cache map[string]cacheHost
-
 	mu sync.Mutex
-}
-
-type cacheHost struct {
-	addr    []net.IPAddr
-	lastHit time.Time
 }
 
 func New() *Resolver {
@@ -46,26 +38,14 @@ func New() *Resolver {
 		RetryLimit:  5,
 		RetrySleep:  time.Millisecond * 500,
 		MaxFails:    30,
-		CacheLimit:  65535,
-		CacheLife:   time.Second * 300,
 
-		Servers: slist.New(slist.ModeRotate, 3, time.Minute*10),
-
-		cache: make(map[string]cacheHost),
+		Servers: slist.New(slist.ModeRotate, 3),
 	}
 
 	return r
 }
 
 func (r *Resolver) LookupIPAddr(host string) (ipList []net.IPAddr, err error) {
-	r.mu.Lock()
-	if v, ok := r.cache[host]; ok && r.CacheLimit > 0 {
-		v.lastHit = time.Now()
-		r.mu.Unlock()
-		return v.addr, nil
-	}
-	r.mu.Unlock()
-
 	err = r.lookup(host, func(resolver *net.Resolver) (err error) {
 		ipList, err = resolver.LookupIPAddr(context.Background(), host)
 		return
@@ -73,15 +53,6 @@ func (r *Resolver) LookupIPAddr(host string) (ipList []net.IPAddr, err error) {
 
 	if r.BypassNative && err == slist.ErrServerListEmpty {
 		ipList, err = net.DefaultResolver.LookupIPAddr(context.Background(), host)
-	}
-
-	if r.CacheLimit > 0 {
-		r.mu.Lock()
-		if len(r.cache) > r.CacheLimit-1 {
-			r.clearCache()
-		}
-		r.cache[host] = cacheHost{addr: ipList, lastHit: time.Now()}
-		r.mu.Unlock()
 	}
 
 	return ipList, err
@@ -178,13 +149,13 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 		err = fn(stdR)
 		{
 			if err, ok := err.(*net.DNSError); ok && err.IsNotFound {
-				server.Good()
+				r.Servers.MarkGood(server)
 				return ErrNoSuchHost
 			} else if err == nil {
-				server.Good()
+				r.Servers.MarkGood(server)
 				break
 			} else {
-				r.Servers.Bad(server)
+				r.Servers.MarkBad(server)
 			}
 		}
 
@@ -193,29 +164,10 @@ func (r *Resolver) lookup(value string, fn func(*net.Resolver) error) error {
 		}
 		attempts++
 
-		if r.Servers.Count() < 20 {
+		if r.Servers.Count() < maxServersForSleep {
 			time.Sleep(r.RetrySleep)
 		}
 	}
 
 	return err
-}
-
-func (r *Resolver) clearCache() {
-	now := time.Now()
-
-	// remove all long time used hosts
-	for h, c := range r.cache {
-		if now.Sub(c.lastHit) >= r.CacheLife {
-			delete(r.cache, h)
-		}
-	}
-
-	// remove the random key if the previous step didn't give result
-	if len(r.cache) >= r.CacheLimit {
-		for h := range r.cache {
-			delete(r.cache, h)
-			break
-		}
-	}
 }
